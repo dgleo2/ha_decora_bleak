@@ -1,0 +1,37 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Select Leviton Decora Device",
+        "description": "**🔦 Discovered Leviton Decora Devices ({device_count})**\n\n{device_list}\n\n---\n\nSelect a device from the dropdown below to add it, or choose manual entry.",
+        "data": {
+          "address": "Device"
+        }
+      },
+      "api_key": {
+        "title": "Enter API Key",
+        "description": "Enter the API key for {device_name} ({address}), or check 'Auto-retrieve' to get it automatically (device must be in pairing mode: press and hold the light switch for 10 seconds until it blinks).",
+        "data": {
+          "api_key": "API Key (Hex string, e.g., 8e89bed6)",
+          "auto_retrieve": "Auto-retrieve API key from device"
+        }
+      },
+      "manual": {
+        "title": "Manual Device Entry",
+        "description": "Enter the device address and API key for your Leviton Decora Bluetooth light.",
+        "data": {
+          "address": "Device Address (MAC address)",
+          "api_key": "API Key (Hex string)"
+        }
+      }
+    },
+    "error": {
+      "cannot_connect": "Failed to connect to device. Make sure the device is powered on, in range, and not connected to another client.",
+      "invalid_auth": "Invalid API key. The device rejected authentication. Please verify the API key is correct or retrieve it again from the device in pairing mode.",
+      "not_in_pairing_mode": "Device is not in pairing mode. Press and hold the light switch for 10 seconds until it blinks, then try again.",
+      "cannot_retrieve_key": "Failed to retrieve API key from device. Make sure the device is in pairing mode (hold switch for 10 seconds until blinking).",
+      "no_devices_found": "No Leviton Decora devices found. Make sure your device is powered on and in range, or use manual entry.",
+      "unknown": "An unknown error occurred. Check the logs for more details."
+    }
+  }
+}

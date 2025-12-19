@@ -1,0 +1,18 @@
+{
+  "domain": "decora_bleak",
+  "name": "Leviton Decora Bluetooth Light",
+  "codeowners": ["@dgleo2"],
+  "config_flow": true,
+  "dependencies": ["bluetooth"],
+  "documentation": "https://github.com/dgleo2/ha_decora_bleak",
+  "integration_type": "device",
+  "iot_class": "local_polling",
+  "requirements": ["bleak>=0.20.0", "async-timeout>=4.0.0", "bleak-retry-connector>=1.0.0"],
+  "version": "0.1.0",
+  "bluetooth": [
+    {
+      "manufacturer_id": 1468,
+      "connectable": false
+    }
+  ]
+}

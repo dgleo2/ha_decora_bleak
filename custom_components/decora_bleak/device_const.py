@@ -1,0 +1,21 @@
+#!/usr/bin/env python
+# -*- coding: utf-8 -*-
+
+# -*- coding: utf-8 -*-
+# Copyright (c) 2023 Colin Campbell
+# MIT license
+# This code was inspired by https://github.com/mjg59/python-decora and https://github.com/lucapinello/pydecora_ble/tree/master
+
+WAIT_FOR_DEVICE_CONNECTION_TIMEOUT = 30
+
+UNPAIRED_API_KEY = bytearray(b'LEVI')
+
+DECORA_SERVICE_UUID = "0000ff00-0000-1000-8000-00805f9b34fb"
+
+SYSTEM_ID_DESCRIPTOR_UUID = "00002a23-0000-1000-8000-00805f9b34fb"
+MODEL_NUMBER_DESCRIPTOR_UUID = "00002a24-0000-1000-8000-00805f9b34fb"
+SOFTWARE_REVISION_DESCRIPTOR_UUID = "00002a28-0000-1000-8000-00805f9b34fb"
+MANUFACTURER_DESCRIPTOR_UUID = "00002a29-0000-1000-8000-00805f9b34fb"
+
+STATE_CHARACTERISTIC_UUID = "0000ff01-0000-1000-8000-00805f9b34fb"
+EVENT_CHARACTERISTIC_UUID = "0000ff06-0000-1000-8000-00805f9b34fb"
