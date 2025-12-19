@@ -1,6 +1,7 @@
 # Leviton Decora Bluetooth (Bleak) — Home Assistant
 
 Control Leviton Decora Bluetooth light switches and dimmers from Home Assistant using the Bleak BLE library. This integration is local-only, fast, and designed to automatically discover and reconnect to your devices.
+I am sharing works I have done with github Copilot to finnaly get control over my Dimmer.
 
 > Tested with model **DD710**
 
@@ -53,28 +54,6 @@ Each device requires an API key (hex string) for authentication.
 
 After setup, you will see standard `light` entities in Home Assistant. Brightness and transition are supported where applicable.
 
-```yaml
-# Example automation
-automation:
-	- alias: "Turn on Decora light at sunset"
-		trigger:
-			- platform: sun
-				event: sunset
-		action:
-			- service: light.turn_on
-				target:
-					entity_id: light.decora_light
-				data:
-					brightness: 150
-					transition: 2
-```
-
-## Troubleshooting
-
-- Device not found: Ensure the device is powered, in range, and your adapter supports BLE.
-- Cannot connect: Confirm the device is not connected to another controller/app.
-- Invalid API key: Re-enter or re-retrieve with the device in pairing mode.
-- Device unavailable: The integration auto-reconnects when rediscovered; verify power and proximity.
 
 ### Enable Debug Logging
 
@@ -88,7 +67,7 @@ logger:
 ## Development & Releases
 
 - Repository: https://github.com/dgleo2/ha_decora_bleak
-- Versioning follows `manifest.json` (e.g., `0.1.0`). Create GitHub releases using matching tags for HACS.
+- Versioning follows `manifest.json` (e.g., `0.1.0`). 
 
 ## Credits
 
@@ -97,8 +76,3 @@ All credits to https://github.com/ColinCampbell/decora_bleak for the original im
 ## License
 
 This integration references the upstream project’s work. Please consult the upstream repository for licensing terms and apply the same where appropriate.
-
-## Support
-
-Open issues and requests here: https://github.com/dgleo2/ha_decora_bleak/issues
-
