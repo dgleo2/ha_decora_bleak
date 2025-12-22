@@ -8,7 +8,7 @@
   "integration_type": "device",
   "iot_class": "local_polling",
   "requirements": ["bleak>=0.20.0", "async-timeout>=4.0.0", "bleak-retry-connector>=1.0.0"],
-  "version": "0.1.0",
+  "version": "0.1.1",
   "bluetooth": [
     {
       "manufacturer_id": 1468,
