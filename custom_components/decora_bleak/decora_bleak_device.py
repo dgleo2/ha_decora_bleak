@@ -167,9 +167,18 @@ class DecoraBLEDevice():
                 except Exception as ex:
                     _LOGGER.error("Failed to establish connection to %s: %s", device.address, ex, exc_info=True)
                     self._handle_device_connection(ex)
+                    # Clean up client if connection or unlock failed
+                    if self._client:
+                        with contextlib.suppress(Exception):
+                            await self._client.disconnect()
+                    self._disconnect_cleanup()
                     raise DeviceConnectionError(str(ex)) from ex
 
                 try:
+                    # Ensure client is still valid after unlock
+                    if not self._client or not self._client.is_connected:
+                        raise DeviceConnectionError("Client disconnected after unlock")
+                    
                     # Issues in unlocking will be seen when first interacting with the device
                     await self._register_for_state_notifications()
 
@@ -184,6 +193,11 @@ class DecoraBLEDevice():
                 except BLEAK_EXCEPTIONS as ex:
                     _LOGGER.error("Incorrect API key or BLE error for %s: %s", device.address, ex, exc_info=True)
                     self._handle_device_connection(ex)
+                    # Clean up on authentication/BLE error
+                    if self._client:
+                        with contextlib.suppress(Exception):
+                            await self._client.disconnect()
+                    self._disconnect_cleanup()
                     raise IncorrectAPIKeyError
         finally:
             self._connecting = False
