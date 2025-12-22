@@ -5,6 +5,7 @@ DOMAIN: Final = "decora_bleak"
 
 CONF_ADDRESS: Final = "address"
 CONF_API_KEY: Final = "api_key"
+CONF_RESET: Final = "reset"
 
 DEFAULT_NAME: Final = "Decora Light"
 
