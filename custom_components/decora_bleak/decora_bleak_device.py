@@ -179,6 +179,9 @@ class DecoraBLEDevice():
                     if not self._client or not self._client.is_connected:
                         raise DeviceConnectionError("Client disconnected after unlock")
                     
+                    # Small delay to allow device to stabilize after unlock
+                    await asyncio.sleep(0.1)
+                    
                     # Issues in unlocking will be seen when first interacting with the device
                     await self._register_for_state_notifications()
 
@@ -285,7 +288,32 @@ class DecoraBLEDevice():
             self._apply_device_state_data(data)
             self._fire_state_callbacks(self._state)
 
-        await self._client.start_notify(STATE_CHARACTERISTIC_UUID, callback)
+        # Retry logic for notification registration
+        # Sometimes the device needs a moment after unlock before accepting notifications
+        max_retries = 3
+        retry_delay = 0.5  # seconds
+        last_exception = None
+        
+        for attempt in range(max_retries):
+            try:
+                await self._client.start_notify(STATE_CHARACTERISTIC_UUID, callback)
+                _LOGGER.debug("Successfully registered for state notifications on attempt %d", attempt + 1)
+                return
+            except BLEAK_EXCEPTIONS as ex:
+                last_exception = ex
+                _LOGGER.warning(
+                    "Failed to register for state notifications (attempt %d/%d): %s",
+                    attempt + 1, max_retries, ex
+                )
+                if attempt < max_retries - 1:
+                    # Wait before retrying
+                    await asyncio.sleep(retry_delay)
+                    # Check if client is still connected
+                    if not self._client or not self._client.is_connected:
+                        raise DeviceConnectionError("Client disconnected during notification registration") from ex
+        
+        # All retries exhausted
+        raise last_exception if last_exception else DeviceConnectionError("Failed to register for notifications")
 
     def _handle_device_connection(self, exception: Exception | None) -> None:
         """Set the device connection future to resolve it."""
