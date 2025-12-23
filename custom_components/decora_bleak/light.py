@@ -34,6 +34,7 @@ class DeviceInstance:
         self.device = device
         self.light_entity = light_entity
         self._reconnect_task_scheduled = False
+        self._last_connection_attempt = 0.0
         self.address = device.address
         self.summary: DecoraBLEDeviceSummary | None = None
 
@@ -43,11 +44,21 @@ class DeviceInstance:
     
     async def _async_reconnect_on_discovery(self) -> None:
         """Handle reconnection when device is rediscovered via Bluetooth."""
+        import time
+        
+        # Check minimum interval between connection attempts (5 seconds)
+        now = time.monotonic()
+        if now - self._last_connection_attempt < 5.0:
+            _LOGGER.debug("%s: Skipping reconnection, last attempt too recent (%.1fs ago)", 
+                         self.address, now - self._last_connection_attempt)
+            return
+        
         if self._reconnect_task_scheduled:
             _LOGGER.debug("%s: Reconnection already scheduled", self.address)
             return
         
         self._reconnect_task_scheduled = True
+        self._last_connection_attempt = now
         try:
             # Small stagger to avoid storm
             try:
@@ -61,7 +72,7 @@ class DeviceInstance:
             # Disconnect current instance
             if self.device.is_connected:
                 await self.device.disconnect()
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(1.0)
             
             # Attempt reconnection
             await self.light_entity._async_start_connection()
@@ -292,7 +303,11 @@ class DecoraBleakLight(LightEntity):
         
         if not self._device.is_connected:
             _LOGGER.debug("%s: Device not connected, connecting...", self.entity_id)
-            await self._device.connect()
+            try:
+                await self._device.connect()
+            except Exception as ex:
+                _LOGGER.error("%s: Failed to connect for turn_on: %s", self.entity_id, ex)
+                raise
 
         if brightness is not None:
             # Map from 0-255 to 0-100
@@ -310,7 +325,11 @@ class DecoraBleakLight(LightEntity):
         
         if not self._device.is_connected:
             _LOGGER.debug("%s: Device not connected, connecting...", self.entity_id)
-            await self._device.connect()
+            try:
+                await self._device.connect()
+            except Exception as ex:
+                _LOGGER.error("%s: Failed to connect for turn_off: %s", self.entity_id, ex)
+                raise
 
         await self._device.turn_off()
         # State will be updated via the state callback
@@ -373,6 +392,12 @@ class DecoraBleakLight(LightEntity):
     async def _async_delayed_initial_connect(self) -> None:
         """Start device and connect after a small delay to avoid reload storms."""
         try:
+            # Wait for Bluetooth integration to be fully ready
+            if not await self._wait_for_bluetooth_ready():
+                _LOGGER.warning("%s: Bluetooth integration not ready, delaying connection", self.entity_id)
+                # Try again after additional delay
+                await asyncio.sleep(5.0)
+            
             delay = self._compute_stagger_delay()
             _LOGGER.debug("%s: Staggered initial connect in %.2fs", self.entity_id, delay)
             await asyncio.sleep(delay)
@@ -383,7 +408,46 @@ class DecoraBleakLight(LightEntity):
     async def _async_on_ha_started(self, _event=None) -> None:
         """Callback when Home Assistant has fully started; begin connection."""
         _LOGGER.debug("%s: HA started; scheduling staggered initial connect", self.entity_id)
+        # Add small delay after HA started to let integrations settle
+        await asyncio.sleep(2.0)
         asyncio.create_task(self._async_delayed_initial_connect())
+
+    async def _wait_for_bluetooth_ready(self) -> bool:
+        """Wait for Bluetooth integration to be ready.
+        
+        Returns True if ready, False if timeout.
+        """
+        try:
+            from homeassistant.components import bluetooth
+            
+            # Check if bluetooth integration is loaded
+            max_wait = 10  # seconds
+            waited = 0
+            check_interval = 0.5
+            
+            while waited < max_wait:
+                try:
+                    # Try to get a BLE device - if this works, bluetooth is ready
+                    device = async_ble_device_from_address(self.hass, self._device.address, connectable=True)
+                    if device is not None:
+                        _LOGGER.debug("%s: Bluetooth integration is ready", self.entity_id)
+                        return True
+                    
+                    # Device not found yet, but integration might still be initializing
+                    await asyncio.sleep(check_interval)
+                    waited += check_interval
+                except Exception as ex:
+                    _LOGGER.debug("%s: Bluetooth not ready yet: %s", self.entity_id, ex)
+                    await asyncio.sleep(check_interval)
+                    waited += check_interval
+            
+            # Timeout - proceed anyway but log warning
+            _LOGGER.warning("%s: Bluetooth readiness check timed out after %ds", self.entity_id, max_wait)
+            return False
+        except Exception as ex:
+            _LOGGER.debug("%s: Error checking bluetooth readiness: %s", self.entity_id, ex)
+            # If we can't check, assume it's ready and proceed
+            return True
 
     async def _start_and_connect(self) -> None:
         """Ensure device is started, then connect."""
@@ -398,25 +462,31 @@ class DecoraBleakLight(LightEntity):
     def _compute_stagger_delay(self) -> float:
         """Compute a deterministic staggered delay per device with small jitter.
 
-        Base 0.5s + deterministic 0..0.5s from entry_id + random 0..0.2s jitter.
+        Base 1.0s + deterministic 0..0.5s from entry_id + random 0..0.2s jitter.
         """
         try:
-            base = 0.5
+            base = 1.0  # Increased from 0.5s to give BLE proxy more time
             deterministic = (sum(ord(c) for c in self._entry.entry_id) % 50) / 100.0
             jitter = random.random() * 0.2  # 0..0.2
             return base + deterministic + jitter
         except Exception:
-            return 0.8
+            return 1.2
 
     async def _async_start_connection(self) -> None:
         """Start or restart device connection (used for reconnection on rediscovery)."""
         try:
             _LOGGER.debug("%s: Starting connection after rediscovery", self.entity_id)
+            
+            # Ensure Bluetooth is ready before reconnecting
+            if not await self._wait_for_bluetooth_ready():
+                _LOGGER.warning("%s: Bluetooth not ready for reconnection, will retry later", self.entity_id)
+                return
+            
             # Stop current connection if running
             if self._device.is_connected:
                 try:
                     await self._device.disconnect()
-                    await asyncio.sleep(0.5)
+                    await asyncio.sleep(1.0)
                 except Exception as ex:
                     _LOGGER.debug("Error disconnecting before reconnection: %s", ex)
 

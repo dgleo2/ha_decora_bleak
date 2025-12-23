@@ -37,7 +37,7 @@ class DecoraBLEDevice():
             DecoraBLEDeviceState], None]] = []
         # Connection coordination
         self._connect_lock = asyncio.Lock()
-        self._connecting = False
+        self._connection_task: asyncio.Task | None = None
 
     @staticmethod
     async def get_api_key(device: BLEDevice) -> str:
@@ -134,76 +134,103 @@ class DecoraBLEDevice():
         if self.is_connected:
             return
 
-        # Avoid concurrent connection attempts
-        if self._connecting:
-            _LOGGER.debug("%s: connect() already in progress, skipping", self._device.address)
-            return
+        async with self._connect_lock:
+            # Re-check after acquiring lock
+            if self.is_connected:
+                return
 
-        self._connecting = True
-        try:
-            async with self._connect_lock:
-                # Re-check after acquiring lock
-                if self.is_connected:
+            # If a connection task is already running, wait for it
+            if self._connection_task and not self._connection_task.done():
+                _LOGGER.debug("%s: connect() already in progress, waiting", self._device.address)
+                try:
+                    await self._connection_task
                     return
+                except Exception:
+                    # Task failed, continue to try new connection
+                    pass
 
-                device = self._device
-                _LOGGER.debug("attempting to connect to %s using key: %s",
-                              device.address, self._key.hex())
+            # Create new connection task
+            self._connection_task = asyncio.create_task(self._do_connect())
+            try:
+                await self._connection_task
+            finally:
+                self._connection_task = None
 
-                def disconnected(client):
-                    _LOGGER.info("Device disconnected: %s", device.address)
-                    self._disconnect_cleanup()
+    async def _do_connect(self) -> None:
+        """Actual connection implementation."""
+        device = self._device
+        _LOGGER.debug("attempting to connect to %s using key: %s",
+                      device.address, self._key.hex())
 
-                try:
-                    self._client = await establish_connection(
-                        BleakClient,
-                        self._device,
-                        self._device.name,
-                        disconnected,
-                        use_services_cache=True,
-                    )
+        def disconnected(client):
+            _LOGGER.info("Device disconnected: %s", device.address)
+            self._disconnect_cleanup()
 
-                    await self._unlock()
-                except Exception as ex:
-                    _LOGGER.error("Failed to establish connection to %s: %s", device.address, ex, exc_info=True)
-                    self._handle_device_connection(ex)
-                    # Clean up client if connection or unlock failed
-                    if self._client:
-                        with contextlib.suppress(Exception):
-                            await self._client.disconnect()
-                    self._disconnect_cleanup()
-                    raise DeviceConnectionError(str(ex)) from ex
+        try:
+            self._client = await establish_connection(
+                BleakClient,
+                self._device,
+                self._device.name,
+                disconnected,
+                use_services_cache=True,
+            )
 
-                try:
-                    # Ensure client is still valid after unlock
-                    if not self._client or not self._client.is_connected:
-                        raise DeviceConnectionError("Client disconnected after unlock")
-                    
-                    # Small delay to allow device to stabilize after unlock
-                    await asyncio.sleep(0.1)
-                    
-                    # Issues in unlocking will be seen when first interacting with the device
-                    await self._register_for_state_notifications()
+            await self._unlock()
+        except IncorrectAPIKeyError:
+            # Re-raise API key errors as-is
+            self._handle_device_connection(IncorrectAPIKeyError())
+            if self._client:
+                with contextlib.suppress(Exception):
+                    await self._client.disconnect()
+            self._disconnect_cleanup()
+            raise
+        except Exception as ex:
+            _LOGGER.error("Failed to establish connection or unlock %s: %s", device.address, ex, exc_info=True)
+            self._handle_device_connection(ex)
+            # Clean up client if connection or unlock failed
+            if self._client:
+                with contextlib.suppress(Exception):
+                    await self._client.disconnect()
+            self._disconnect_cleanup()
+            raise DeviceConnectionError(str(ex)) from ex
 
-                    self._summary = await self._summarize()
-                    self._handle_device_connection(None)
-                    self._fire_connection_callbacks(self._summary)
+        try:
+            # Ensure client is still valid after unlock
+            if not self._client or not self._client.is_connected:
+                raise DeviceConnectionError("Client disconnected after unlock")
+            
+            # Wait for device to process unlock before attempting operations
+            # This is critical - device needs time to update authorization state
+            await asyncio.sleep(0.5)
+            
+            # Verify unlock worked by attempting a test read
+            try:
+                await self._client.read_gatt_char(STATE_CHARACTERISTIC_UUID)
+                _LOGGER.debug("Unlock verification successful for %s", device.address)
+            except Exception as ex:
+                _LOGGER.error("Unlock verification failed for %s: %s", device.address, ex)
+                raise IncorrectAPIKeyError from ex
+            
+            # Issues in unlocking will be seen when first interacting with the device
+            await self._register_for_state_notifications()
 
-                    await self._read_state()
+            self._summary = await self._summarize()
+            self._handle_device_connection(None)
+            self._fire_connection_callbacks(self._summary)
 
-                    _LOGGER.info("Successfully connected to %s", device.address)
-                    _LOGGER.debug("Finished connecting %s", self._client.is_connected)
-                except BLEAK_EXCEPTIONS as ex:
-                    _LOGGER.error("Incorrect API key or BLE error for %s: %s", device.address, ex, exc_info=True)
-                    self._handle_device_connection(ex)
-                    # Clean up on authentication/BLE error
-                    if self._client:
-                        with contextlib.suppress(Exception):
-                            await self._client.disconnect()
-                    self._disconnect_cleanup()
-                    raise IncorrectAPIKeyError
-        finally:
-            self._connecting = False
+            await self._read_state()
+
+            _LOGGER.info("Successfully connected to %s", device.address)
+            _LOGGER.debug("Finished connecting %s", self._client.is_connected)
+        except BLEAK_EXCEPTIONS as ex:
+            _LOGGER.error("Incorrect API key or BLE error for %s: %s", device.address, ex, exc_info=True)
+            self._handle_device_connection(ex)
+            # Clean up on authentication/BLE error
+            if self._client:
+                with contextlib.suppress(Exception):
+                    await self._client.disconnect()
+            self._disconnect_cleanup()
+            raise IncorrectAPIKeyError
 
     async def disconnect(self) -> None:
         """Disconnect the BLE client if connected."""
@@ -233,9 +260,40 @@ class DecoraBLEDevice():
         )
 
     async def read_summary_descriptor(self, descriptor: str, descriptor_uuid: str) -> bytearray:
-        raw_response = await self._client.read_gatt_char(descriptor_uuid)
-        _LOGGER.debug("Raw %s from device: %s", descriptor, repr(raw_response))
-        return raw_response
+        """Read descriptor with retry logic for authorization timing issues."""
+        max_retries = 3
+        retry_delay = 0.3
+        last_exception = None
+        
+        for attempt in range(max_retries):
+            try:
+                raw_response = await self._client.read_gatt_char(descriptor_uuid)
+                _LOGGER.debug("Raw %s from device: %s", descriptor, repr(raw_response))
+                return raw_response
+            except BLEAK_EXCEPTIONS as ex:
+                last_exception = ex
+                error_msg = str(ex).lower()
+                
+                # Check if it's an authorization error that might resolve with retry
+                if "authorization" in error_msg or "authentication" in error_msg:
+                    _LOGGER.warning(
+                        "Authorization error reading %s (attempt %d/%d): %s",
+                        descriptor, attempt + 1, max_retries, ex
+                    )
+                    if attempt < max_retries - 1:
+                        # Give device more time to process authorization
+                        await asyncio.sleep(retry_delay)
+                        # Check if still connected
+                        if not self._client or not self._client.is_connected:
+                            raise DeviceConnectionError(f"Client disconnected while reading {descriptor}") from ex
+                    continue
+                else:
+                    # Non-authorization error, don't retry
+                    raise
+        
+        # All retries exhausted
+        _LOGGER.error("Failed to read %s after %d attempts", descriptor, max_retries)
+        raise last_exception if last_exception else DeviceConnectionError(f"Failed to read {descriptor}")
 
     def _revision_string(self, value: bytearray, prefix: str) -> Optional[str]:
         stripped_value = value.decode('utf-8').removeprefix(prefix)
@@ -264,8 +322,15 @@ class DecoraBLEDevice():
         self._state = DecoraBLEDeviceState()
 
     async def _unlock(self):
+        """Send unlock command to device with API key."""
         packet = bytearray([0x11, 0x53, *self._key])
-        await self._client.write_gatt_char(EVENT_CHARACTERISTIC_UUID, packet, response=True)
+        _LOGGER.debug("Sending unlock command to %s", self._device.address)
+        try:
+            await self._client.write_gatt_char(EVENT_CHARACTERISTIC_UUID, packet, response=True)
+            _LOGGER.debug("Unlock command sent successfully to %s", self._device.address)
+        except Exception as ex:
+            _LOGGER.error("Failed to send unlock command to %s: %s", self._device.address, ex)
+            raise
 
     def _apply_device_state_data(self, data: bytearray) -> None:
         self._state = replace(
@@ -291,20 +356,31 @@ class DecoraBLEDevice():
         # Retry logic for notification registration
         # Sometimes the device needs a moment after unlock before accepting notifications
         max_retries = 3
-        retry_delay = 0.5  # seconds
+        retry_delay = 0.4  # seconds
         last_exception = None
         
         for attempt in range(max_retries):
             try:
                 await self._client.start_notify(STATE_CHARACTERISTIC_UUID, callback)
-                _LOGGER.debug("Successfully registered for state notifications on attempt %d", attempt + 1)
+                _LOGGER.debug("Successfully registered for state notifications on attempt %d for %s", 
+                             attempt + 1, self._device.address)
                 return
             except BLEAK_EXCEPTIONS as ex:
                 last_exception = ex
-                _LOGGER.warning(
-                    "Failed to register for state notifications (attempt %d/%d): %s",
-                    attempt + 1, max_retries, ex
-                )
+                error_msg = str(ex).lower()
+                
+                # Check if it's an authorization error
+                if "authorization" in error_msg or "authentication" in error_msg:
+                    _LOGGER.warning(
+                        "%s: Authorization error registering notifications (attempt %d/%d): %s",
+                        self._device.address, attempt + 1, max_retries, ex
+                    )
+                else:
+                    _LOGGER.warning(
+                        "%s: Failed to register for state notifications (attempt %d/%d): %s",
+                        self._device.address, attempt + 1, max_retries, ex
+                    )
+                    
                 if attempt < max_retries - 1:
                     # Wait before retrying
                     await asyncio.sleep(retry_delay)
