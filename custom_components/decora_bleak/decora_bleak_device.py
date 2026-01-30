@@ -392,12 +392,33 @@ class DecoraBLEDevice():
         self._state = state
         packet = bytearray([1 if state.is_on else 0, state.brightness_level])
         _LOGGER.debug("Writing state: %s", state)
-        await self._client.write_gatt_char(STATE_CHARACTERISTIC_UUID, packet, response=True)
+        try:
+            await self._client.write_gatt_char(STATE_CHARACTERISTIC_UUID, packet, response=True)
+        except (TimeoutError, asyncio.TimeoutError) as ex:
+            _LOGGER.warning("%s: Timeout during write operation, connection lost: %s", self.address, ex)
+            # Clean up the connection so device becomes unavailable
+            self._disconnect_cleanup()
+            # Re-raise so caller knows the operation failed
+            raise
+        except BLEAK_EXCEPTIONS as ex:
+            _LOGGER.warning("%s: BLE error during write operation: %s", self.address, ex)
+            # Clean up the connection
+            self._disconnect_cleanup()
+            raise
 
     async def _read_state(self) -> None:
-        data = await self._client.read_gatt_char(STATE_CHARACTERISTIC_UUID)
-        self._apply_device_state_data(data)
-        self._fire_state_callbacks(self._state)
+        try:
+            data = await self._client.read_gatt_char(STATE_CHARACTERISTIC_UUID)
+            self._apply_device_state_data(data)
+            self._fire_state_callbacks(self._state)
+        except (TimeoutError, asyncio.TimeoutError) as ex:
+            _LOGGER.warning("%s: Timeout during read operation, connection lost: %s", self.address, ex)
+            self._disconnect_cleanup()
+            raise
+        except BLEAK_EXCEPTIONS as ex:
+            _LOGGER.warning("%s: BLE error during read operation: %s", self.address, ex)
+            self._disconnect_cleanup()
+            raise
 
     async def _register_for_state_notifications(self) -> None:
         def callback(sender: BleakGATTCharacteristic, data: bytearray) -> None:
