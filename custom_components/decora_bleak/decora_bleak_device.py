@@ -38,6 +38,11 @@ class DecoraBLEDevice():
         # Connection coordination
         self._connect_lock = asyncio.Lock()
         self._connection_task: asyncio.Task | None = None
+        self._connect_event = asyncio.Event()  # Signal when connection completes
+        self._connecting = False  # Track if connection is in progress
+        self._ever_connected = False  # True only after first successful connection
+        self._is_shutting_down = False  # Prevent new operations during shutdown
+        self._background_tasks: set = set()  # Track all background tasks for cleanup
 
     @staticmethod
     async def get_api_key(device: BLEDevice) -> str:
@@ -50,6 +55,18 @@ class DecoraBLEDevice():
                 return bytearray(rawkey)[2:].hex()
             else:
                 raise DeviceNotInPairingModeError
+
+    def _create_task(self, coro):
+        """Create a background task and track it for cleanup."""
+        if self._is_shutting_down:
+            _LOGGER.debug("%s: Skipping task creation during shutdown", self.address)
+            # Close the coroutine to prevent "was never awaited" warning
+            coro.close()
+            return None
+        task = asyncio.create_task(coro)
+        self._background_tasks.add(task)
+        task.add_done_callback(self._background_tasks.discard)
+        return task
 
     async def start(self) -> Callable[[], None]:
         """Start watching for updates."""
@@ -130,9 +147,28 @@ class DecoraBLEDevice():
 
     async def connect(self) -> None:
         """Establish BLE connection with idempotency and coordination."""
+        # Don't connect if shutting down
+        if self._is_shutting_down:
+            _LOGGER.debug("%s: Skipping connection during shutdown", self.address)
+            raise DeviceConnectionError("Device is shutting down")
+        
         # Fast path: already connected
         if self.is_connected:
             return
+        
+        # If already connecting, wait for it to complete
+        if self._connecting:
+            _LOGGER.debug("%s: Connection already in progress, waiting...", self.address)
+            try:
+                # Wait with timeout for connection to complete
+                await asyncio.wait_for(self._connect_event.wait(), timeout=30.0)
+                if self.is_connected:
+                    _LOGGER.debug("%s: Connected after waiting", self.address)
+                    return
+                else:
+                    raise DeviceConnectionError("Connection attempt failed")
+            except asyncio.TimeoutError:
+                raise asyncio.TimeoutError(f"{self.address}: Timed out waiting for in-progress connection")
 
         async with self._connect_lock:
             # Re-check after acquiring lock
@@ -149,12 +185,18 @@ class DecoraBLEDevice():
                     # Task failed, continue to try new connection
                     pass
 
-            # Create new connection task
-            self._connection_task = asyncio.create_task(self._do_connect())
+            # Mark as connecting
+            self._connecting = True
             try:
-                await self._connection_task
+                # Create new connection task
+                self._connection_task = asyncio.create_task(self._do_connect())
+                try:
+                    await self._connection_task
+                finally:
+                    self._connection_task = None
             finally:
-                self._connection_task = None
+                self._connecting = False
+                self._connect_event.set()  # Signal connection attempt completed
 
     async def _do_connect(self) -> None:
         """Actual connection implementation."""
@@ -164,7 +206,14 @@ class DecoraBLEDevice():
 
         def disconnected(client):
             _LOGGER.info("Device disconnected: %s", device.address)
+            # Only log as info if we've ever successfully connected
+            # This prevents noise during initial connection attempts
+            if self._ever_connected:
+                _LOGGER.info("Device %s disconnected (was previously connected)", device.address)
+            else:
+                _LOGGER.debug("Device %s disconnected (never fully connected)", device.address)
             self._disconnect_cleanup()
+            self._connect_event.clear()  # Clear event so waiting calls will wait again
 
         try:
             self._client = await establish_connection(
@@ -219,6 +268,8 @@ class DecoraBLEDevice():
             self._fire_connection_callbacks(self._summary)
 
             await self._read_state()
+            
+            self._ever_connected = True  # Mark as successfully connected at least once
 
             _LOGGER.info("Successfully connected to %s", device.address)
             _LOGGER.debug("Finished connecting %s", self._client.is_connected)
@@ -409,3 +460,22 @@ class DecoraBLEDevice():
     def _fire_state_callbacks(self, state: DecoraBLEDeviceState) -> None:
         for callback in self._state_callbacks:
             callback(state)
+
+    async def stop(self) -> None:
+        """Stop the device and clean up all resources."""
+        _LOGGER.debug("%s: Stopping device", self.address)
+        self._is_shutting_down = True
+        self._running = False
+        
+        # Cancel all background tasks
+        for task in list(self._background_tasks):
+            if not task.done():
+                _LOGGER.debug("%s: Cancelling task", self.address)
+                task.cancel()
+        
+        # Wait for all tasks to complete
+        if self._background_tasks:
+            await asyncio.gather(*self._background_tasks, return_exceptions=True)
+        
+        # Disconnect from device
+        await self.disconnect()

@@ -5,7 +5,8 @@ import logging
 from typing import Final
 
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.core import HomeAssistant
+from homeassistant.core import HomeAssistant, Event
+from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 
 _LOGGER: logging.Logger = logging.getLogger(__name__)
 
@@ -23,6 +24,21 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     _LOGGER.debug("Platforms setup complete for %s", entry.entry_id)
     
     entry.async_on_unload(entry.add_update_listener(async_reload_entry))
+    
+    # Register shutdown handler to ensure clean disconnect
+    async def _async_stop(event: Event) -> None:
+        _LOGGER.debug("Stopping Decora Bleak (%s) due to HA shutdown", entry.data.get("address"))
+        if DOMAIN in hass.data and entry.entry_id in hass.data[DOMAIN]:
+            device_instance = hass.data[DOMAIN].get(entry.entry_id)
+            if device_instance and hasattr(device_instance, 'device'):
+                try:
+                    await device_instance.device.stop()
+                except Exception as ex:
+                    _LOGGER.debug("Error stopping device during shutdown: %s", ex)
+    
+    entry.async_on_unload(
+        hass.bus.async_listen_once(EVENT_HOMEASSISTANT_STOP, _async_stop)
+    )
     
     return True
 

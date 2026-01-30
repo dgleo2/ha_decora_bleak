@@ -46,6 +46,12 @@ class DeviceInstance:
         """Handle reconnection when device is rediscovered via Bluetooth."""
         import time
         
+        # Only reconnect if we've ever successfully connected before
+        # This prevents unnecessary reconnection attempts during initialization
+        if not getattr(self.device, '_ever_connected', False):
+            _LOGGER.debug("%s: Never successfully connected; skipping automatic reconnection", self.address)
+            return
+        
         # Check minimum interval between connection attempts (5 seconds)
         now = time.monotonic()
         if now - self._last_connection_attempt < 5.0:
